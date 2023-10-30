@@ -4,10 +4,12 @@ import torchvision.models
 from model.training import *
 from main import *
 
+import json
 import numpy as np
 import pandas as pd
 
 import os
+import random
 from os.path import join
 import argparse
 import gc
@@ -18,6 +20,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 
+import lgad
 from retrieval_utils import get_retrieval_accuracies__from_all, get_retrieval_figs, get_retrieval_attrs_and_modulos
 
 np.random.seed(2)
@@ -25,7 +28,8 @@ np.random.seed(2)
 save_results_path = 'results'
 os.makedirs(save_results_path, exist_ok=True)
 
-weights_folder = 'eval_weights/tmp_weights'
+hash = str(random.getrandbits(64))[-6:]
+weights_folder = f'eval_weights_{hash}/tmp_weights'
 
 
 # region Evaluation Args
@@ -37,17 +41,21 @@ def get_evaluated_experiments(args):
     exps_data = args.model_train_data if args.model_train_data is not None else args.train_data_name
     for root_exp_name in args.root_exps:
         root_exp_path = join(args.base_dir, 'models', exps_data, root_exp_name)
-        for obj in os.listdir(root_exp_path)[::-1]:
-            obj_path = join(root_exp_path, obj)
-            if os.path.isdir(obj_path):
-                skip = True
-                for x in os.listdir(obj_path):
-                    if np.sum([str(args.chosen_epoch[i]) in x for i in range(len(args.chosen_epoch))]) > 0:
-                        skip = False
-                        break
-                if skip:
-                    continue
-                args.evaluated_exp_names.append(join(root_exp_name, obj))
+        if "clip" == root_exp_path.split("/")[-1]:
+            args.evaluated_exp_names.append(root_exp_name)
+            break
+        else:
+            for obj in os.listdir(root_exp_path)[::-1]:
+                obj_path = join(root_exp_path, obj)
+                if os.path.isdir(obj_path):
+                    skip = True
+                    for x in os.listdir(obj_path):
+                        if np.sum([str(args.chosen_epoch[i]) in x for i in range(len(args.chosen_epoch))]) > 0:
+                            skip = False
+                            break
+                    if skip:
+                        continue
+                    args.evaluated_exp_names.append(join(root_exp_name, obj))
     print('\n'.join(args.evaluated_exp_names))
 
     return args.evaluated_exp_names
@@ -104,18 +112,18 @@ def get_evaluation_args():
 # region DataSet Related Helpers
 
 def get_content_colnames(args):
-    if 'celeba' in args.train_data_name:
-        content_cols = list(np.arange(136).astype(str))
-    elif args.train_data_name in ['smallnorb_train', 'smallnorb_test']:
-        content_cols = ['azimuth', 'elevation', 'lighting']
-    elif 'shapes3d' in args.train_data_name:
-        content_cols = ['floor_hue', 'wall_hue', 'object_hue', 'scale', 'shape', 'orientation']
-        for cont in content_cols:
-            if cont in args.train_data_name:
-                content_cols.remove(cont)
-                break
-    else:
-        content_cols = ['content']
+    # if 'celeba' in args.train_data_name:
+    #     content_cols = list(np.arange(136).astype(str))
+    # elif args.train_data_name in ['smallnorb_train', 'smallnorb_test']:
+    #     content_cols = ['azimuth', 'elevation', 'lighting']
+    # elif 'shapes3d' in args.train_data_name:
+    #     content_cols = ['floor_hue', 'wall_hue', 'object_hue', 'scale', 'shape', 'orientation']
+    #     for cont in content_cols:
+    #         if cont in args.train_data_name:
+    #             content_cols.remove(cont)
+    #             break
+    # else:
+    content_cols = ['content']
 
     return content_cols
 
@@ -137,7 +145,7 @@ def parse_dataloader(data, args):
 
     dataset_ = NamedTensorDataset(torch_data)
     dataloader = DataLoader(
-        dataset_, batch_size=32,
+        dataset_, batch_size=256,
         shuffle=True, num_workers=workers,
         drop_last=False
     )
@@ -150,14 +158,15 @@ def parse_dataloader(data, args):
 # region Model Related Helpers
 
 def get_model(args, model_name, chosen_epoch):
-    encoding_model = Encoder_Model(config)
     weights_prefix = 'encoder'
+    encoding_model = Encoder_Model(config)
     model_dir = join(args.base_dir, 'models', model_name)
-    weights_path = os.path.join(model_dir, f'{weights_prefix}_{chosen_epoch}.pth')
-    if not os.path.exists(weights_path):
-        return -1
-    state_d = torch.load(weights_path)
-    encoding_model.load_state_dict(state_d)
+    if "clip" != model_dir.split("/")[-1]:
+        weights_path = os.path.join(model_dir, f'{weights_prefix}_{chosen_epoch}.pth')
+        if not os.path.exists(weights_path):
+            return -1
+        state_d = torch.load(weights_path)
+        encoding_model.load_state_dict(state_d)
     encoding_model.to(device)
     encoding_model.eval()
     return encoding_model
@@ -178,7 +187,8 @@ def loop_once_gather_outputs(args, data_loader, model):
 
         batch = {name: tensor.to(args.device) for name, tensor in batch.items()}
 
-        orig_out = model(batch['img'])
+        with torch.no_grad():
+            orig_out = model(batch['img'])
         # Note the regularization in case other models (besides DCoDR / DCoDR-norec) are added validated
         orig_out['code'] = F.normalize(orig_out['code'], dim=-1)
         codes.append(orig_out['code'].detach().cpu())
@@ -380,15 +390,15 @@ def predict_contents_nn(args, train_codes, train_contents,
             val_contents[factor_name] = val_contents[factor_name].apply(lambda x: mapping[x])
             test_contents[factor_name] = test_contents[factor_name].apply(lambda x: mapping[x])
 
-        workers = 4
+        workers = 16
         if not args.cuda:
             workers = 0
         train_set = DataFrame_Dataset(train_codes, train_contents[factor_name].values)
-        train_loader = DataLoader(train_set, batch_size=128, shuffle=True, pin_memory=False, num_workers=workers)
+        train_loader = DataLoader(train_set, batch_size=512, shuffle=True, pin_memory=False, num_workers=workers)
         val_set = DataFrame_Dataset(val_codes, val_contents[factor_name].values)
-        val_loader = DataLoader(val_set, batch_size=128, shuffle=True, pin_memory=False, num_workers=workers)
+        val_loader = DataLoader(val_set, batch_size=512, shuffle=True, pin_memory=False, num_workers=workers)
         test_set = DataFrame_Dataset(test_codes, test_contents[factor_name].values)
-        test_loader = DataLoader(test_set, batch_size=128, shuffle=False, pin_memory=False, num_workers=workers)
+        test_loader = DataLoader(test_set, batch_size=512, shuffle=False, pin_memory=False, num_workers=workers)
         if landmarks_clause and original_factor_name == 'landmarks':
             factor_name = 'landmarks'
 
@@ -424,9 +434,18 @@ def predict_contents_nn(args, train_codes, train_contents,
         test_loss, test_probs, test_targets = classifier_prediction(model, test_loader, is_classification)
         print(f'Test Loss: {test_loss}')
         if is_classification:
+            # test_probs.shape = (n_samples, n_classes)
             accuracy = np.mean(np.argmax(test_probs, axis=1) == test_targets)
-            print(factor_name, '- prediction accuracy:', accuracy)
-            all_accs[factor_name] = accuracy
+
+            metric = lgad.binary_metrics(torch.Tensor(test_probs[:, 1]), torch.Tensor(test_targets))
+            metric.update(
+                {
+                    "classification_acc": accuracy,
+                }
+            )
+            metric = {f"{factor_name + '_' + k}": v for k, v in metric.items()}
+            print(json.dumps(metric, indent=4))
+            all_accs.update(metric)
         else:
             print(factor_name, '- prediction error:', test_loss)
             all_accs[factor_name + '_' + 'test_loss'] = test_loss
@@ -441,7 +460,7 @@ def predict_contents_nn(args, train_codes, train_contents,
 if __name__ == '__main__':
 
     args = get_evaluation_args()
-    landmarks_clause = 'celeba' in args.train_data_name
+    landmarks_clause = False  # 'celeba' in args.train_data_name
 
     print(f'evaluating experiments:\n')
 
@@ -449,7 +468,7 @@ if __name__ == '__main__':
     args.device = device
     assets = AssetManager(args.base_dir)
 
-    if 'celeba' in args.train_data_name:
+    if False:  # 'celeba' in args.train_data_name:
         all_data, _, _ = load_np_data(assets, args.test_data_name, args.cuda)
         # remove small classes
         num_samples_by_class = pd.Series(all_data['classes']).value_counts()
@@ -499,9 +518,13 @@ if __name__ == '__main__':
 
             exp_train_data = args.model_train_data if args.model_train_data is not None else args.train_data_name
             model_name = join(exp_train_data, exp_name)
-            with open(join(assets.get_model_dir(model_name), 'config.pkl'), 'rb') as f:
-                config = pickle.load(f)
-            print(config)
+            if "clip" == model_name.split("/")[-1]:
+                with open(join(assets.get_model_dir(join(exp_train_data, "DCoDR_clip_" + exp_train_data[:-6] + "/tau_0_2")), 'config.pkl'), 'rb') as f:
+                    config = pickle.load(f)
+            else:
+                with open(join(assets.get_model_dir(model_name), 'config.pkl'), 'rb') as f:
+                    config = pickle.load(f)
+                print(config)
             encoder_model = get_model(args, model_name, chosen_epoch)
             if encoder_model == -1:
                 continue
@@ -533,7 +556,7 @@ if __name__ == '__main__':
 
                 # Split to train and val
 
-                if 'celeba' not in args.train_data_name:
+                if True:  # 'celeba' not in args.train_data_name:
                     for factor_name in all_contents.columns:
                         mapping_dict = {x: i for i, x in enumerate(sorted(all_contents[factor_name].unique()))}
                         all_contents[factor_name] = all_contents[factor_name].apply(lambda x: mapping_dict[x])
@@ -554,7 +577,7 @@ if __name__ == '__main__':
 
                 # Predict Contents
 
-                if eval_counter == 0 and 'celeba' not in args.train_data_name:
+                if eval_counter == 0 and True:  # 'celeba' not in args.train_data_name:
                     for factor in all_contents.columns:
                         print(f'\n\nMajority: ({factor})')
                         num_unique = len(np.unique(all_contents[factor]))
@@ -591,18 +614,21 @@ if __name__ == '__main__':
             else:
                 raise ValueError(f'No such eval type as {args.eval_type}')
 
+            _results_df = {
+                "exp_name": exp_name + f'__epoch_{chosen_epoch}',
+                **cur_results,
+            }
             if results_df is None:
-                results_df = pd.DataFrame(
-                    -1 * np.ones((len(args.evaluated_exp_names), 1 + len(cur_results.keys())))).reset_index(drop=True)
-                results_df.columns = ['exp_name'] + list(cur_results.keys())
+                results_df = [_results_df]
+            else:
+                results_df.append(_results_df)
 
-            results_df.loc[eval_counter, 'exp_name'] = exp_name + f'__epoch_{chosen_epoch}'
-            for k in cur_results.keys():
-                results_df.loc[eval_counter, k] = cur_results[k]
 
     if os.path.exists(f'{weights_folder}'):
         # delete evaluation classifier weights
         shutil.rmtree(f'{weights_folder}')
 
+    results_df = pd.DataFrame(results_df)
     results_df.to_csv(
         join(save_results_path, f'{args.test_data_name}__{args.eval_name}__{args.eval_type}__results.csv'))
+    print(join(save_results_path, f'{args.test_data_name}__{args.eval_name}__{args.eval_type}__results.csv'))

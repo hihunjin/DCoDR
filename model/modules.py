@@ -52,16 +52,34 @@ class Generator_Only_Model(nn.Module):
             nn.init.uniform_(m.weight, a=-0.05, b=0.05)
 
 
+class CLIP_IMAGE_ENCODER(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        import clip
+
+        self.encoder = clip.load('ViT-B/32', jit=False)[0]
+        self.encoder.float()
+
+    def forward(self, img):
+        img = F.interpolate(img, size=(224, 224), mode='bilinear', align_corners=False)
+        output = self.encoder.encode_image(img)
+        return output.type(torch.float32)
+
+
 class Encoder_Model(nn.Module):
 
     def __init__(self, config):
         super().__init__()
 
         self.config = config
-
         if 'use_pretrain' not in config:
             config['use_pretrain'] = True
-        self.content_encoder = Moco_Resnet50(config['content_dim'], use_pretrain=config['use_pretrain'])
+
+        self.clip = True
+        if self.clip:
+            self.content_encoder = CLIP_IMAGE_ENCODER()
+        else:
+            self.content_encoder = Moco_Resnet50(config['content_dim'], use_pretrain=config['use_pretrain'])
         self.content_encoder = torch.nn.DataParallel(self.content_encoder)
 
         if not 'use_fc_head' in self.config:
@@ -69,7 +87,7 @@ class Encoder_Model(nn.Module):
 
         if self.config['use_fc_head']:
             self.siamese = nn.Sequential(
-                nn.Linear(in_features=config['content_dim'],
+                nn.Linear(in_features=512 if self.clip else config['content_dim'],
                           out_features=config['content_dim']),
                 nn.LeakyReLU(),
                 nn.Linear(in_features=config['content_dim'],
@@ -206,7 +224,7 @@ class Generator(nn.Module):
 class Moco_Resnet50(nn.Module):
 
     def __init__(self, code_dim, use_pretrain=True,
-                 pretrained_weights_path='pretrained_weights/moco_v2_800ep_pretrain.pth'):
+                 pretrained_weights_path='pretrained_weights/moco_v2_800ep_pretrain.pth.tar'):
         super().__init__()
         self.resnet50 = torchvision.models.resnet50(pretrained=False, num_classes=128)
         self.resnet50.fc = nn.Sequential(nn.Linear(2048, 2048))

@@ -1,0 +1,5 @@
+tensorboard
+scikit-learn
+plotly
+Pillow==9.5.0
+torcheval

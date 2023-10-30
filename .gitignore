@@ -4,3 +4,4 @@ cache/
 pretrained_weights/
 results/
 eval_weights/
+*__pycache__*

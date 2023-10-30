@@ -12,7 +12,7 @@ import face_alignment  # library from https://github.com/1adrianb/face-alignment
 
 from sklearn.model_selection import train_test_split
 
-dataset_folder = 'raw_data/celeba'
+dataset_folder = '/NFS/database_personal/anomaly_detection/data/CelebA/celeba'
 save_folder = 'cache/preprocess'
 os.makedirs(save_folder, exist_ok=True)
 
@@ -30,6 +30,33 @@ class DataSet(ABC):
         pass
 
 
+import csv
+import torch
+from typing import Optional, List, Union
+
+
+def _load_csv(
+    base_folder,
+    filename: str,
+    header: Optional[int] = None,
+) -> pd.DataFrame:
+    with open(os.path.join(base_folder, filename)) as csv_file:
+        data = list(csv.reader(csv_file, delimiter=" ", skipinitialspace=True))
+
+    if header is not None:
+        headers = data[header]
+        data = data[header + 1 :]
+    else:
+        headers = []
+
+    indices = [row[0] for row in data]
+    data = [row[1:] for row in data]
+    data_int = [list(map(int, i)) for i in data]
+
+    df = pd.DataFrame(data_int, index=indices, columns=headers[1:])
+    return df
+
+
 class CelebA(DataSet):
 
     def __init__(self, base_dir, train):
@@ -38,9 +65,9 @@ class CelebA(DataSet):
         suffix = 'train'
         if not train:
             suffix = 'test'
-        self.__imgs_dir = os.path.join(self._base_dir, 'Img', f'align_{suffix}', f'align_{suffix}')
+        self.__imgs_dir = base_dir
         self.__identity_map_path = os.path.join(self._base_dir, 'identity_CelebA.txt')
-        self.__full_contents = os.path.join(self._base_dir, 'full_contents.csv')
+        # self.__full_contents = os.path.join(self._base_dir, 'full_contents.csv')
 
     def __list_imgs(self):
         with open(self.__identity_map_path, 'r') as fd:
@@ -64,8 +91,9 @@ class CelebA(DataSet):
 
     def read_images(self, crop_size=(128, 128), target_size=(64, 64)):
         img_paths, class_ids, img_ids = self.__list_imgs()
-        full_contents = pd.read_csv(self.__full_contents)
-        full_contents = full_contents.set_index('image_id')
+        full_contents = _load_csv(dataset_folder, "list_attr_celeba.txt", header=1)
+        # full_contents = pd.read_csv(self.__full_contents)
+        # full_contents = full_contents.set_index('image_id')
         cur_contents = full_contents.loc[img_ids, :].values
 
         unique_class_ids = list(set(class_ids))
@@ -93,7 +121,7 @@ class CelebA(DataSet):
 
 
 def find_landmarks(imgs):
-    fa = face_alignment.FaceAlignment(face_alignment.LandmarksType._2D, flip_input=False)
+    fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, flip_input=False)
     landmarks = np.zeros(shape=(imgs.shape[0], 68 * 2), dtype=np.float32)
     for i in tqdm(range(imgs.shape[0])):
         preds = fa.get_landmarks(imgs[i])
